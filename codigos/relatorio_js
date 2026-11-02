@@ -1,0 +1,172 @@
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------
+  // Referências de elementos
+  // ---------------------------------------------------------------
+  const inputNumero      = document.getElementById('rel-input-numero');
+  const btnPesquisar     = document.getElementById('rel-btn-pesquisar');
+  const btnGerarPDF      = document.getElementById('rel-btn-gerar-pdf');
+  const divMensagem      = document.getElementById('rel-mensagem');
+  const divCarregando    = document.getElementById('rel-carregando');
+  const divResumo        = document.getElementById('rel-resumo');
+
+  const campos = {
+    status: document.getElementById('rel-campo-status'),
+    maquina: document.getElementById('rel-campo-maquina'),
+    solicitante: document.getElementById('rel-campo-solicitante'),
+    setor: document.getElementById('rel-campo-setor'),
+    responsavel: document.getElementById('rel-campo-responsavel'),
+    tempo: document.getElementById('rel-campo-tempo'),
+    abertura: document.getElementById('rel-campo-abertura'),
+    encerramento: document.getElementById('rel-campo-encerramento')
+  };
+
+  let numeroConsultado = null; // guarda o número já validado, pronto p/ gerar PDF
+
+  // ---------------------------------------------------------------
+  // Helpers de UI
+  // ---------------------------------------------------------------
+  function esconderTudo() {
+    divMensagem.classList.add('hidden');
+    divResumo.classList.add('hidden');
+    btnGerarPDF.disabled = true;
+    numeroConsultado = null;
+  }
+
+  function mostrarMensagem(texto, tipo) {
+    // tipo: 'erro' | 'aviso'
+    divMensagem.textContent = texto;
+    divMensagem.classList.remove('hidden', 'bg-red-100', 'text-red-700', 'bg-amber-100', 'text-amber-700');
+
+    if (tipo === 'erro') {
+      divMensagem.classList.add('bg-red-100', 'text-red-700');
+    } else {
+      divMensagem.classList.add('bg-amber-100', 'text-amber-700');
+    }
+  }
+
+  function preencherResumo(dados) {
+    campos.status.textContent = dados.status;
+    campos.maquina.textContent = dados.maquina || '-';
+    campos.solicitante.textContent = dados.solicitante || '-';
+    campos.setor.textContent = dados.setor || '-';
+    campos.responsavel.textContent = dados.responsavel || '-';
+    campos.tempo.textContent = dados.tempoAtendimento || '-';
+    campos.abertura.textContent = dados.dataAbertura || '-';
+    campos.encerramento.textContent = dados.dataEncerramento || '-';
+    divResumo.classList.remove('hidden');
+  }
+
+  // ---------------------------------------------------------------
+  // Ação: Pesquisar
+  // ---------------------------------------------------------------
+  function pesquisar() {
+    const numero = inputNumero.value.trim();
+
+    esconderTudo();
+
+    if (!numero) {
+      mostrarMensagem('Informe o número da requisição.', 'aviso');
+      return;
+    }
+
+    divCarregando.classList.remove('hidden');
+    btnPesquisar.disabled = true;
+
+    google.script.run
+      .withSuccessHandler(function (resultado) {
+        divCarregando.classList.add('hidden');
+        btnPesquisar.disabled = false;
+        tratarResultado(numero, resultado);
+      })
+      .withFailureHandler(function (erro) {
+        divCarregando.classList.add('hidden');
+        btnPesquisar.disabled = false;
+        mostrarMensagem('Erro ao consultar: ' + erro.message, 'erro');
+      })
+      .consultarRequisicaoCompleta(numero);
+  }
+
+  function tratarResultado(numero, resultado) {
+    switch (resultado.tipo) {
+      case 'nao_encontrada':
+        mostrarMensagem('Requisição não encontrada.', 'erro');
+        break;
+
+      case 'nao_encerrada':
+        mostrarMensagem(
+          'A requisição ainda não foi encerrada. Não é possível gerar o relatório.',
+          'aviso'
+        );
+        break;
+
+      case 'ok':
+        preencherResumo(resultado);
+        numeroConsultado = numero;
+        btnGerarPDF.disabled = false;
+        break;
+
+      case 'erro':
+      default:
+        mostrarMensagem(resultado.mensagem || 'Erro inesperado ao consultar a requisição.', 'erro');
+        break;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Ação: Gerar PDF
+  // ---------------------------------------------------------------
+  function gerarPDF() {
+    if (!numeroConsultado) return;
+
+    btnGerarPDF.disabled = true;
+    btnGerarPDF.textContent = 'Gerando...';
+
+    google.script.run
+      .withSuccessHandler(function (arquivo) {
+        baixarArquivoBase64(arquivo.base64, arquivo.mimeType, arquivo.nomeArquivo);
+        btnGerarPDF.disabled = false;
+        btnGerarPDF.textContent = '📄 Gerar PDF';
+      })
+      .withFailureHandler(function (erro) {
+        mostrarMensagem('Erro ao gerar PDF: ' + erro.message, 'erro');
+        btnGerarPDF.disabled = false;
+        btnGerarPDF.textContent = '📄 Gerar PDF';
+      })
+      .gerarRelatorioPDF(numeroConsultado);
+  }
+
+  /** Converte o base64 recebido do servidor em download no navegador. */
+  function baixarArquivoBase64(base64, mimeType, nomeArquivo) {
+    const bytes = atob(base64);
+    const buffer = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) {
+      buffer[i] = bytes.charCodeAt(i);
+    }
+
+    const blob = new Blob([buffer], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = nomeArquivo;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  // ---------------------------------------------------------------
+  // Eventos
+  // ---------------------------------------------------------------
+  btnPesquisar.addEventListener('click', pesquisar);
+  btnGerarPDF.addEventListener('click', gerarPDF);
+  inputNumero.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') pesquisar();
+  });
+
+})();
+</script>
+
