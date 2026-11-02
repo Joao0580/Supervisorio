@@ -1,0 +1,160 @@
+/*** ==== CONFIGURAÇÕES GERAIS ==== ***/
+
+// Coluna de requisição no Painel (Coluna I = índice 8)
+const COL_REQ_DESTINO = 8;
+
+// CHECKIN (A:data, B:req, D:nome)
+const CI_COL_DATA = 0;
+const CI_COL_REQ  = 1;
+const CI_COL_NOME = 2;
+
+// CHECKOUT (A:data, B:req, C:nome, E:status)
+const CO_COL_DATA   = 0;
+const CO_COL_REQ    = 1;
+const CO_COL_NOME   = 2;
+const CO_COL_STATUS = 3;
+
+// Status que remove o nome da lista
+const STATUS_LIMPA = 'ABERTO';
+
+// Coluna de saída no Painel (ex: O = 14)
+const COL_SAIDA_PAINEL = 14;
+
+
+/*** ==== FUNÇÕES AUXILIARES ==== ***/
+function toTime(value) {
+  if (value instanceof Date) return value.getTime();
+  const d = new Date(value);
+  const t = d.getTime();
+  return isNaN(t) ? null : t;
+}
+
+function getTightValues_(sheet) {
+  const lr = sheet.getLastRow();
+  const lc = sheet.getLastColumn();
+  if (lr === 0 || lc === 0) return [[]];
+  return sheet.getRange(1, 1, lr, lc).getValues();
+}
+
+
+/*** ==== CRIAÇÃO DE ÍNDICES ==== ***/
+function criarIndiceCheckIn(checkInData) {
+  const indice = new Map(); // req -> Map(nome -> último check-in)
+
+  for (let i = 1; i < checkInData.length; i++) {
+    const linha = checkInData[i];
+    const req = String(linha[CI_COL_REQ] || '').trim();
+    const nome = linha[CI_COL_NOME];
+    const tIn  = toTime(linha[CI_COL_DATA]);
+
+    if (!req || !nome || tIn === null) continue;
+
+    if (!indice.has(req)) indice.set(req, new Map());
+    const byNome = indice.get(req);
+    const atual = byNome.get(nome);
+    if (atual == null || tIn > atual) byNome.set(nome, tIn);
+  }
+  return indice;
+}
+
+function criarIndiceCheckOut(checkOutData) {
+  const indice = new Map(); // req -> Map(nome -> último checkout ABERTO)
+
+  for (let i = 1; i < checkOutData.length; i++) {
+    const linha = checkOutData[i];
+    const req = String(linha[CO_COL_REQ] || '').trim();
+    const status = String(linha[CO_COL_STATUS] || '').trim();
+    const nome = linha[CO_COL_NOME];
+    const tOut = toTime(linha[CO_COL_DATA]);
+
+    if (!req || !nome || tOut === null) continue;
+    if (status !== STATUS_LIMPA) continue;
+
+    if (!indice.has(req)) indice.set(req, new Map());
+    const byNome = indice.get(req);
+    const atual = byNome.get(nome);
+    if (atual == null || tOut > atual) byNome.set(nome, tOut);
+  }
+  return indice;
+}
+
+
+/*** ==== PROCESSAMENTO ==== ***/
+function processarRequisicao(req, checkInMap, checkOutMap) {
+  const nomes = [];
+  const inMap = checkInMap.get(req);
+  const outMap = checkOutMap.get(req);
+
+  if (!inMap) return nomes;
+
+  inMap.forEach((tIn, nome) => {
+    let manter = true;
+    if (outMap && outMap.has(nome)) {
+      if (tIn <= outMap.get(nome)) manter = false;
+    }
+    if (manter) nomes.push(nome);
+  });
+
+  return nomes;
+}
+
+
+/*** ==== ATUALIZA PAINEL ==== ***/
+function atualizarPainel() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const shIn = ss.getSheetByName('checkin');
+  const shOut = ss.getSheetByName('checkout');
+  const shPainel = ss.getSheetByName('PAINEL');
+
+  if (!shIn || !shOut || !shPainel) {
+    Logger.log('checkin, checkout ou PAINEL não encontrados.');
+    return;
+  }
+
+  const checkInMap = criarIndiceCheckIn(getTightValues_(shIn));
+  const checkOutMap = criarIndiceCheckOut(getTightValues_(shOut));
+
+  const data = getTightValues_(shPainel);
+  if (data.length <= 1) return;
+
+  const oldCol = shPainel
+    .getRange(2, COL_SAIDA_PAINEL + 1, data.length - 1, 1)
+    .getValues();
+
+  const novaCol = [];
+  let changed = false;
+
+  for (let i = 1; i < data.length; i++) {
+    const req = data[i][COL_REQ_DESTINO];
+    let out = '';
+
+    if (req) {
+      const nomes = processarRequisicao(String(req).trim(), checkInMap, checkOutMap);
+      out = nomes.length ? nomes.join(', ') : '';
+    }
+
+    novaCol.push([out]);
+    if (!changed && (oldCol[i - 1][0] || '') !== out) changed = true;
+  }
+
+  if (changed) {
+    shPainel
+      .getRange(2, COL_SAIDA_PAINEL + 1, novaCol.length, 1)
+      .setValues(novaCol);
+  }
+}
+
+
+/*** ==== GATILHO AUTOMÁTICO ==== ***/
+function criarGatilhoAtualizacaoAutomatica() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'atualizarPainel') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  ScriptApp.newTrigger('atualizarPainel')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+}
