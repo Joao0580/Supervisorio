@@ -1,0 +1,311 @@
+/**
+ * =====================================================================
+ * MÓDULO DE RELATÓRIOS - Supervisório de Manutenção
+ * =====================================================================
+ * Responsável por:
+ *  - Buscar dados de uma requisição na aba BASE
+ *  - Buscar o checkout mais recente na aba Checkout
+ *  - Calcular o tempo total de atendimento
+ *  - Gerar um PDF profissional do relatório
+ *
+ * Depende de:
+ *  - Relatorio.html      -> template usado somente para montar o PDF
+ *  - RelatoriosSection.html + relatorios.js.html -> tela do usuário
+ *
+ * Ajuste os nomes das abas / índices de coluna em REL_CFG caso a
+ * estrutura da sua planilha mude.
+ * =====================================================================
+ */
+
+const REL_CFG = {
+  ABA_BASE: 'BASE',
+  ABA_CHECKOUT: 'checkout',
+  STATUS_ENCERRADO: 'ENCERRADO',
+  // Opcional: ID de uma pasta do Google Drive para salvar uma cópia
+  // automática de cada PDF gerado. Deixe '' para não salvar.
+  PASTA_DRIVE_ID: '',
+  FUSO_HORARIO: Session.getScriptTimeZone() || 'America/Sao_Paulo'
+};
+
+// ---------------------------------------------------------------------
+// BUSCA DE DADOS
+// ---------------------------------------------------------------------
+
+/**
+ * Busca uma requisição na aba BASE pelo número informado.
+ * @param {string|number} numero Número da requisição.
+ * @return {Object|null} Dados da requisição ou null se não encontrada.
+ */
+function relBuscarRequisicao(numero) {
+  const numeroBusca = String(numero).trim();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REL_CFG.ABA_BASE);
+  if (!sheet) throw new Error('Aba "' + REL_CFG.ABA_BASE + '" não encontrada.');
+
+  const dados = sheet.getDataRange().getValues();
+
+  // i = 1 para pular o cabeçalho
+  for (let i = 1; i < dados.length; i++) {
+    const linha = dados[i];
+    const numLinha = String(linha[1]).trim(); // Coluna B
+
+    if (numLinha === numeroBusca) {
+      return {
+        dataAbertura: linha[0],                          // Coluna A
+        numero: numLinha,                                // Coluna B
+        solicitante: linha[2],                           // Coluna C
+        setor: linha[3],                                 // Coluna D
+        maquina: linha[15],                              // Coluna P
+        status: String(linha[18] || '').trim().toUpperCase() // Coluna S
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Busca todos os checkouts de uma requisição e retorna apenas o mais
+ * recente (maior data na coluna A da aba Checkout).
+ * @param {string|number} numero Número da requisição.
+ * @return {Object|null} Dados do checkout mais recente ou null.
+ */
+function relBuscarCheckoutMaisRecente(numero) {
+  const numeroBusca = String(numero).trim();
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REL_CFG.ABA_CHECKOUT);
+  if (!sheet) throw new Error('Aba "' + REL_CFG.ABA_CHECKOUT + '" não encontrada.');
+
+  const dados = sheet.getDataRange().getValues();
+  let maisRecente = null;
+
+  for (let i = 1; i < dados.length; i++) {
+    const linha = dados[i];
+    const numLinha = String(linha[1]).trim(); // Coluna B
+
+    if (numLinha !== numeroBusca) continue;
+
+    const dataCheckout = linha[0]; // Coluna A
+    const candidato = {
+      dataCheckout: dataCheckout,
+      numero: numLinha,
+      responsavel: linha[2],    // Coluna C
+      acaoExecutada: linha[7],  // Coluna H
+      observacoes: linha[8],    // Coluna I
+      localFalha: linha[9],     // Coluna J
+      modoFalha: linha[10],     // Coluna K
+      componentes: linha[11]    // Coluna L
+    };
+
+    if (!maisRecente || new Date(dataCheckout) > new Date(maisRecente.dataCheckout)) {
+      maisRecente = candidato;
+    }
+  }
+
+  return maisRecente;
+}
+
+// ---------------------------------------------------------------------
+// CÁLCULO DE TEMPO
+// ---------------------------------------------------------------------
+
+/**
+ * Calcula o tempo entre a abertura e o encerramento e devolve um texto
+ * amigável, ex: "2 dias 5 horas 18 minutos".
+ * @param {Date|string} dataInicio
+ * @param {Date|string} dataFim
+ * @return {string}
+ */
+function relCalcularTempoAtendimento(dataInicio, dataFim) {
+  const inicio = new Date(dataInicio);
+  const fim = new Date(dataFim);
+  let diffMs = fim.getTime() - inicio.getTime();
+  if (isNaN(diffMs) || diffMs < 0) diffMs = 0;
+
+  const diffMin = Math.floor(diffMs / 60000);
+  const dias = Math.floor(diffMin / (60 * 24));
+  const horas = Math.floor((diffMin % (60 * 24)) / 60);
+  const minutos = diffMin % 60;
+
+  const partes = [];
+  if (dias > 0) partes.push(dias + (dias === 1 ? ' dia' : ' dias'));
+  if (horas > 0) partes.push(horas + (horas === 1 ? ' hora' : ' horas'));
+  if (minutos > 0 || partes.length === 0) {
+    partes.push(minutos + (minutos === 1 ? ' minuto' : ' minutos'));
+  }
+
+  return partes.join(' ');
+}
+
+/** Formata uma data para dd/MM/yyyy HH:mm no fuso do script. */
+function relFormatarData(data) {
+  if (!data) return '-';
+  return Utilities.formatDate(new Date(data), REL_CFG.FUSO_HORARIO, 'dd/MM/yyyy HH:mm');
+}
+
+// ---------------------------------------------------------------------
+// CONSULTA PRINCIPAL (chamada pelo front-end)
+// ---------------------------------------------------------------------
+
+/**
+ * Função principal chamada via google.script.run pelo botão "Pesquisar".
+ * Retorna um objeto com "tipo" indicando o estado do resultado:
+ *   - 'nao_encontrada'
+ *   - 'nao_encerrada'
+ *   - 'ok'
+ *   - 'erro'
+ * @param {string|number} numero
+ * @return {Object}
+ */
+function consultarRequisicaoCompleta(numero) {
+  try {
+    if (!numero || String(numero).trim() === '') {
+      return { tipo: 'erro', mensagem: 'Informe um número de requisição válido.' };
+    }
+
+    const requisicao = relBuscarRequisicao(numero);
+    if (!requisicao) {
+      return { tipo: 'nao_encontrada' };
+    }
+
+    if (requisicao.status !== REL_CFG.STATUS_ENCERRADO) {
+      return { tipo: 'nao_encerrada', status: requisicao.status };
+    }
+
+    const checkout = relBuscarCheckoutMaisRecente(numero);
+    if (!checkout) {
+      return {
+        tipo: 'erro',
+        mensagem: 'Requisição encerrada, mas nenhum checkout foi localizado para ela.'
+      };
+    }
+
+    const tempoAtendimento = relCalcularTempoAtendimento(
+      requisicao.dataAbertura,
+      checkout.dataCheckout
+    );
+
+    return {
+      tipo: 'ok',
+      numero: requisicao.numero,
+      status: requisicao.status,
+      solicitante: requisicao.solicitante,
+      setor: requisicao.setor,
+      maquina: requisicao.maquina,
+      responsavel: checkout.responsavel,
+      localFalha: checkout.localFalha,
+      modoFalha: checkout.modoFalha,
+      componentes: checkout.componentes,
+      acaoExecutada: checkout.acaoExecutada,
+      observacoes: checkout.observacoes,
+      dataAbertura: relFormatarData(requisicao.dataAbertura),
+      dataEncerramento: relFormatarData(checkout.dataCheckout),
+      tempoAtendimento: tempoAtendimento
+    };
+  } catch (erro) {
+    return { tipo: 'erro', mensagem: 'Erro ao consultar requisição: ' + erro.message };
+  }
+}
+
+// ---------------------------------------------------------------------
+// GERAÇÃO DO PDF
+// ---------------------------------------------------------------------
+
+/**
+ * Gera o PDF do relatório de manutenção para uma requisição encerrada.
+ * Chamada via google.script.run pelo botão "Gerar PDF".
+ * @param {string|number} numero
+ * @return {Object} { nomeArquivo, base64, mimeType } para download no cliente.
+ */
+function gerarRelatorioPDF(numero) {
+  const resultado = consultarRequisicaoCompleta(numero);
+
+  if (resultado.tipo !== 'ok') {
+    throw new Error(
+      resultado.mensagem ||
+      'A requisição não está encerrada ou não foi encontrada. Não é possível gerar o PDF.'
+    );
+  }
+
+  const template = HtmlService.createTemplateFromFile('RelatorioPDF');
+  template.dados = resultado;
+
+  // Pega o HTML já processado (com os valores substituídos) como texto puro
+  const htmlContent = template.evaluate().getContent();
+
+  // Técnica mais confiável para converter HTML -> PDF no Apps Script:
+  // criar um Blob de texto/html e pedir a conversão para application/pdf.
+  // (usar htmlOutput.getAs('application/pdf') direto costuma gerar PDF em
+  // branco quando o HTML tem CSS mais complexo, como grid/flexbox)
+  const blobHtml = Utilities.newBlob(htmlContent, 'text/html', 'RelatorioPDF.html');
+  const blobPdf = blobHtml.getAs('application/pdf')
+    .setName('OS_' + resultado.numero + '.pdf');
+
+  // Salva uma cópia opcional no Google Drive
+  if (REL_CFG.PASTA_DRIVE_ID) {
+    try {
+      const pasta = DriveApp.getFolderById(REL_CFG.PASTA_DRIVE_ID);
+      pasta.createFile(blobPdf);
+    } catch (erroDrive) {
+      // Não interrompe a geração do PDF caso o salvamento no Drive falhe
+      console.warn('Não foi possível salvar cópia no Drive: ' + erroDrive.message);
+    }
+  }
+
+  return {
+    nomeArquivo: blobPdf.getName(),
+    base64: Utilities.base64Encode(blobPdf.getBytes()),
+    mimeType: blobPdf.getContentType()
+  };
+}
+
+// ---------------------------------------------------------------------
+// UTILITÁRIO DE INCLUSÃO DE HTML
+// ---------------------------------------------------------------------
+
+/**
+ * Permite montar a página juntando vários arquivos HTML, ex:
+ *   <?!= include('RelatoriosSection'); ?>
+ *   <?!= include('relatorios.js'); ?>
+ * Caso seu projeto já tenha uma função include(), não duplique-a:
+ * apenas garanta que os nomes de arquivo abaixo funcionem com ela.
+ */
+function include(nomeArquivo) {
+  return HtmlService.createHtmlOutputFromFile(nomeArquivo).getContent();
+}
+
+// ---------------------------------------------------------------------
+// MENU E JANELA MODAL DENTRO DA PLANILHA
+// ---------------------------------------------------------------------
+
+/**
+ * Executa automaticamente quando a planilha é aberta e cria o menu
+ * personalizado. Se o seu projeto JÁ TEM uma função onOpen(), NÃO crie
+ * uma segunda - apenas copie a linha ".addItem('📄 Relatórios', ...)"
+ * para dentro do seu onOpen() existente, dentro do mesmo .createMenu(),
+ * ou adicione ".addToUi()" separado com createMenu('Relatórios').
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Supervisório')
+    .addItem('📄 Relatórios', 'abrirJanelaRelatorios')
+    .addToUi();
+}
+
+/**
+ * Abre a tela de Relatórios como uma janela modal (pop-up) dentro do
+ * próprio Google Sheets. Chamada pelo item de menu criado em onOpen().
+ */
+function abrirJanelaRelatorios() {
+  const template = HtmlService.createTemplateFromFile('RelatoriosDialog');
+  const html = template.evaluate()
+    .setWidth(760)
+    .setHeight(640);
+
+  SpreadsheetApp.getUi().showModalDialog(html, 'Relatórios de Manutenção');
+}
+
+
+function doGet() {
+  const template = HtmlService.createTemplateFromFile('RelatoriosDialog');
+
+  return template.evaluate()
+    .setTitle('Relatórios de Manutenção');
+}
