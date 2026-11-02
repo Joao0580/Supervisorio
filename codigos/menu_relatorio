@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #f8fafc;
+    }
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+
+  <?!= include('RelatoriosSection'); ?>
+  <?!= include('relatorios.js'); ?>
+
+</body>
+</html>
